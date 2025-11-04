@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Senter Otomatis - Deteksi Gelap & Gerakan</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: Arial, sans-serif;
+        background: #0a1020;
+        color: #e8f3ff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+      }
+      .container {
+        width: 90%;
+        max-width: 700px;
+        background: linear-gradient(
+          180deg,
+          rgba(255, 255, 255, 0.03),
+          rgba(255, 255, 255, 0.02)
+        );
+        padding: 16px 20px;
+        border-radius: 12px;
+        box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+        border: 1px solid rgba(255, 255, 255, 0.05);
+      }
+      h1 {
+        margin-top: 0;
+        color: #00b7ff;
+        font-size: 20px;
+      }
+      p {
+        color: #b7c9ff;
+        font-size: 14px;
+      }
+      video {
+        width: 100%;
+        border-radius: 8px;
+        background: #000;
+        margin-top: 12px;
+      }
+      .bar {
+        height: 12px;
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 8px;
+        overflow: hidden;
+        margin-top: 4px;
+        margin-bottom: 12px;
+      }
+      .bar > div {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #00b7ff, #00ffb0);
+        transition: width 0.2s;
+      }
+      .label {
+        font-size: 13px;
+        color: #9bb5d7;
+      }
+      .controls {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        margin-top: 12px;
+      }
+      button {
+        background: #00b7ff;
+        border: none;
+        padding: 8px 12px;
+        border-radius: 8px;
+        cursor: pointer;
+        color: #001;
+        font-weight: bold;
+      }
+      button.ghost {
+        background: transparent;
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        color: #e8f3ff;
+      }
+      .status {
+        margin-top: 10px;
+        font-size: 13px;
+        color: #b7c9ff;
+      }
+      .indicator {
+        margin-top: 12px;
+        text-align: center;
+        font-size: 15px;
+        font-weight: bold;
+        color: #00ffb0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>Senter Otomatis</h1>
+      <p>
+        Aplikasi ini akan menyalakan senter HP bila kondisi
+        <strong>gelap</strong> saja, atau
+        <strong>gelap dan ada gerakan</strong>.
+      </p>
+      <video id="video" autoplay playsinline muted></video>
+      <canvas
+        id="canvas"
+        width="320"
+        height="240"
+        style="display: none"
+      ></canvas>
+
+      <div class="label">Tingkat Kecerahan</div>
+      <div class="bar"><div id="barBright"></div></div>
+
+      <div class="label">Tingkat Gerakan</div>
+      <div class="bar"><div id="barMotion"></div></div>
+
+      <div class="controls">
+        <button id="startBtn">Mulai Kamera</button>
+        <button id="stopBtn" class="ghost">Hentikan</button>
+        <button id="toggleTorch" class="ghost">Toggle Senter Manual</button>
+      </div>
+
+      <div class="status" id="status">Status: Menunggu...</div>
+      <div class="indicator" id="torchIndicator">Senter: OFF</div>
+    </div>
+
+    <script>
+      const video = document.getElementById("video");
+      const canvas = document.getElementById("canvas");
+      const ctx = canvas.getContext("2d");
+      const barBright = document.getElementById("barBright");
+      const barMotion = document.getElementById("barMotion");
+      const statusEl = document.getElementById("status");
+      const torchIndicator = document.getElementById("torchIndicator");
+      let stream = null;
+      let track = null;
+      let prevFrame = null;
+      let torchOn = false;
+      let canTorch = false;
+      let running = false;
+
+      function log(msg) {
+        statusEl.textContent = "Status: " + msg;
+      }
+
+      function avgBrightness(img) {
+        const data = img.data;
+        let sum = 0;
+        const step = 4 * 5;
+        for (let i = 0; i < data.length; i += step) {
+          const r = data[i],
+            g = data[i + 1],
+            b = data[i + 2];
+          sum += 0.299 * r + 0.587 * g + 0.114 * b;
+        }
+        return sum / (data.length / step);
+      }
+
+      function motionDiff(prev, curr) {
+        if (!prev) return 0;
+        const d1 = prev.data,
+          d2 = curr.data;
+        let sum = 0;
+        const step = 4 * 5;
+        for (let i = 0; i < d1.length; i += step) {
+          sum +=
+            Math.abs(d1[i] - d2[i]) +
+            Math.abs(d1[i + 1] - d2[i + 1]) +
+            Math.abs(d1[i + 2] - d2[i + 2]);
+        }
+        return sum / (d1.length / step);
+      }
+
+      async function setTorch(on) {
+        if (!track) return;
+        try {
+          await track.applyConstraints({ advanced: [{ torch: on }] });
+          torchOn = on;
+          torchIndicator.textContent = "Senter: " + (on ? "ON" : "OFF");
+          torchIndicator.style.color = on ? "#00ffb0" : "#ff6060";
+          log("Senter " + (on ? "nyala" : "mati"));
+        } catch (e) {
+          console.warn("Torch gagal:", e);
+        }
+      }
+
+      async function checkTorch() {
+        if (!track) return false;
+        const caps = track.getCapabilities ? track.getCapabilities() : {};
+        canTorch = !!caps.torch;
+        return canTorch;
+      }
+
+      async function startCamera() {
+        if (stream) return;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              facingMode: { ideal: "environment" },
+              width: { ideal: 640 },
+              height: { ideal: 480 },
+            },
+          });
+          video.srcObject = stream;
+          track = stream.getVideoTracks()[0];
+          await checkTorch();
+          running = true;
+          analyze();
+          log("Kamera aktif. Dukungan senter: " + (canTorch ? "YA" : "TIDAK"));
+        } catch (e) {
+          log("Gagal akses kamera: " + e.message);
+        }
+      }
+
+      function stopCamera() {
+        if (stream) {
+          stream.getTracks().forEach((t) => t.stop());
+          stream = null;
+          track = null;
+        }
+        running = false;
+        log("Kamera dihentikan");
+      }
+
+      async function analyze() {
+        if (!running) return;
+        const w = (canvas.width = Math.min(320, video.videoWidth || 320));
+        const h = (canvas.height = Math.min(240, video.videoHeight || 240));
+        ctx.drawImage(video, 0, 0, w, h);
+        const frame = ctx.getImageData(0, 0, w, h);
+        const bright = avgBrightness(frame);
+        const motion = motionDiff(prevFrame, frame);
+        prevFrame = frame;
+
+        const brightPct = Math.min(100, Math.max(0, (bright / 255) * 100));
+        const motionPct = Math.min(100, Math.max(0, (motion / 255) * 100));
+        barBright.style.width = brightPct + "%";
+        barMotion.style.width = motionPct + "%";
+
+        const isDark = bright < 60; // ambang kecerahan
+        const isMoving = motion > 10; // ambang gerakan
+
+        // ✅ Logika baru:
+        // Nyalakan senter jika: (gelap saja) ATAU (gelap + gerakan)
+        const shouldOn = (isDark && isMoving) || (isDark && !isMoving);
+
+        log(
+          `Kecerahan=${bright.toFixed(1)} ${
+            isDark ? "(Gelap)" : ""
+          } | Gerakan=${motion.toFixed(1)} ${isMoving ? "(Ada)" : "(Tidak)"}`
+        );
+
+        if (shouldOn && canTorch && !torchOn) await setTorch(true);
+        if (!shouldOn && torchOn) await setTorch(false);
+
+        setTimeout(analyze, 150);
+      }
+
+      document.getElementById("startBtn").onclick = startCamera;
+      document.getElementById("stopBtn").onclick = stopCamera;
+      document.getElementById("toggleTorch").onclick = () => setTorch(!torchOn);
+
+      window.addEventListener("beforeunload", () => {
+        stopCamera();
+      });
+    </script>
+  </body>
+</html>
